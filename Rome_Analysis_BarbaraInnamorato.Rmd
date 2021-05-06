@@ -1,0 +1,553 @@
+---
+title: "Geospatial Analysis and Representation for Data Science - University of Trento"
+subtitle: "Rome Analysis"
+author: "Barbara Innamorato 213907"
+output: html_document
+---
+```{r}
+sessionInfo()
+#R version 4.0.5 (2021-03-31)
+#Platform: x86_64-apple-darwin17.0 (64-bit)
+#Running under: macOS Big Sur 10.16
+```
+
+
+# INTRODUCTION
+For this part of the project I'm going to use the geopackage called rome_analysis.gpkg created in the previous part though the python script. 
+
+The goal for this part of the analysis is to see if there exist a spatial autocorrelation between the 53 (4 missed) neighborhoods of Rome since "objects closed in space are more related with respect to far objects". This means that maybe the median price previously computed  may depend on some relation between neighborhoods (or not) hence violating the assumption of independence. Spatial data require to use the **Spatial regression approach** in order to take in account the spatial dependence within spatial units and to quantify and test the spatial spillovers. If the linear model is applied the cross relation (spatial spillover) is zero and this leads to misleading results for both estimates and inferences. \
+
+Variables in the dataset are: 
+
+  * "neighborhood"    : name  
+  * "tot_schools"      : total number of schools 
+  * "median_price"     
+  * "population"        
+  * "area"             
+  * "pop_density"      : population density
+  * "tourist_activites": total number of tourist activities
+
+Fortunately the dataset accounts for 53 neighborhoods so we may be in the position to have significant results (at least 30 for reliable results).  
+
+```{r libraries, include=FALSE, warning=FALSE, message=FALSE}
+# package needed
+#install.packages("knitr")
+#install.packages("leaps")
+#install.packages("spdep")
+#install.packages("rgdal")
+#install.packages("boot")
+
+
+library(knitr)
+library(leaps)
+library(spdep)
+library(rgdal)
+library(boot)
+```
+Read the file made on the python notebook \
+```{r read gpkg, warning=FALSE}
+rome <- readOGR(dsn ="rome_analysis.gpkg" , layer = "neighbourhood" )
+kable(rome@data, caption = "Neighbourhoods")
+dim(rome@data)
+```
+```{r plot rome, fig.align='center'}
+plot(rome)
+title(main="Rome")
+```
+
+
+```{r explore rome}
+print(names(rome@data))
+str(rome@data)
+head(rome@data)
+
+```
+\ 
+It is necessary to correct the format of tot_schools and tourist_activities from character to numeric:\
+```{r adjust}
+rome$tot_schools <- as.numeric(rome$tot_schools)
+rome$tourist_activites <- as.numeric(rome$tourist_activites)
+
+str(rome@data)
+```
+
+
+Compute centroids \
+```{r  centroids, fig.align='center' }
+coords <- coordinates(rome) #Defining spatial neighbours
+plot(rome, border="blue") ;points(coords, cex=0.8)
+title(main="Centroids of Rome neighbours")
+#coords
+```
+\
+Check for outliers in the variable *median_price*  \
+```{r outlier detection, fig.align='center'}
+boxplot(rome$median_price) 
+median(rome$median_price)
+
+```
+  + no outlier
+  + median price is 65€ (in the notebook it was 68€ for all available rooms. This difference may be due to the fact that here there are 4 neighborhoods less than those in the jupyter notebook. Again, this depends on the spatial joins performed to create the gpkg)
+  
+
+# SPATIAL WEIGHT MATRIX 
+To take in account the spatial dependence it is necessary to specify a **Spatial weight matrix W** that contains the weighted relation between spatial units. The spatial weight matrix can be defined in different ways, here the k-nearest neighbors, the critical cut-off neighborhood and the contiguity based method are applied to define these different matrices. This is an important step since the results of the analysis heavily depend on this definition.  \
+
+## DEFINE CLOSENESS - SPATIAL TOPOLOGY
+The spatial topology is not natural given so that it is important to choose a criterion in order to define two units as neighbors. Since we have the centroids of each neighborhoods we can use the distances as weights in the spatial weight matrix, so the first step will be to choose a proper distance metric.
+
+### K-NEAREST NEIGHBORS
+### With k = 1 and k = 4
+To ensure that each unit has the same number of neighbors the k-nearest neighbors criterion is applied assuming that two spatial units can be considered as neighbors if their distance is less than or equal to the minimum possible distance that can be found among all the observations. 
+
+Since we want first that all units have at least 1 neighbor, we specify k=1. Then, k=4 to see if there is a (significant) difference. \
+
+```{r knn(s), fig.align='center'}
+#k = 1
+knn1 <- knn2nb(knearneigh(coords,k=1,longlat=T)) #  longlat --> point(lon,lat)
+print(knn1)
+plot(rome, border="grey");plot(knn1, coords, add=TRUE)
+title(main="k neares neighbor, k = 1")
+
+#k = 4
+knn4 <- knn2nb(knearneigh(coords,k=4,longlat=T))
+print(knn4)
+plot(rome, border="grey");plot(knn4, coords, add=TRUE)
+title(main="k neares neighbor, k = 4") 
+```
+\
+
+* With k = 1 we ask that each neighbor has at least 1 neighbor. \
+* With k = 4  also Ostia is connected to other neighbors. \
+
+### CRITICAL CUT OFF
+The Critical cut-off criterion implies that two spatial units can be considered as neighbors if their distance is equal to or less than a certain fixed distance which represents a critical cut-off. The cut off has to be chosen carefully to ensures that each spatial unit has at least one neighbor. Differently from the knn method, with the critical cut-off spatial units may have a different number of neighborhoods. \
+
+First compute the minimum distance: \
+```{r minimum distance}
+knn1 <- knn2nb(knearneigh(coords,k=1,longlat=T)) # compute distances 
+all.linkedT <- max(unlist(nbdists(knn1, coords, longlat=T)))  # choose the cut-off 
+all.linkedT 
+```
+
+First compute all distances through the knn, then take the max value among them to find the minimum value for the cut-off in order to have at least one connection. If the cut-off is too small, then there is the risk that a unit may have zero links.\
+Using 3.124075 km as minimum distance each unit has at least one link.
+
+```{r cut off 0}
+dnb <- dnearneigh(coords, 0, all.linkedT, longlat=TRUE)
+dnb
+```
+
+```{r cut off 0 plot, fig.align='center'}
+plot(rome, border="grey",xlab="",ylab="",xlim=NULL)
+title(main="d nearest neighbors, d = 3.12 km") 
+plot(dnb, coords, add=TRUE, col="blue")
+```
+\
+Clearly, as the cut-off distance increases the number of links increases. \
+Try with a greater cut off: \
+```{r cut off 1, fig.align='center'}
+dnb2 <- dnearneigh(coords, 0, 4.8, longlat=TRUE)
+plot(rome, border="grey",xlab="",ylab="",xlim=NULL)
+title(main="d nearest neighbors, d = 4.8 km") 
+plot(dnb2, coords, add=TRUE, col="red")
+dnb2
+```
+
+```{r cut off 1 plot, fig.align='center'}
+dnb3 <- dnearneigh(coords, 0, 6.0, longlat=TRUE); dnb3
+plot(rome, border="grey",xlab="",ylab="",xlim=NULL)
+title(main="d nearest neighbors, d = 6.0 km") 
+plot(dnb3, coords, add=TRUE, col="blue")
+dnb3
+```
+
+
+### CONTIGUITY BASED
+The contiguity-based neighborhood criterion assumes that two spatial units are neighbors if they share a common boundary (or common vertex). Using the queen method borders and verteces are considered. 
+```{r cont based}
+contnb <- poly2nb(rome, queen=T) #queen = T means "Common border and corner points of the spatial unit"
+plot(rome, border="grey");plot(contnb, coords, add=TRUE)
+title(main="contiguity based - queen") 
+contnb
+
+```
+\
+With the queen method the average number of links is 4. Obviously, Ostia is not connected with other neighborhoods since there is no a common boundary nor vertex (miss Agro Romano). For this reason it should be better to consider one of the two other methods.\
+
+## DEFINE SPATIAL WEIGHT MATRIX
+Now, it is possible to build the row-standardized spatial weight matrices with all the specification, for the critical cut off the chosen one is dnb2 with a value of 4.8 km (with the standardization the value of the Moran's I index ranges from -1 to +1.. 
+```{r row standardized}
+sp_knn1 <- nb2listw(knn1,style = 'W') # k=1
+sp_knn4 <- nb2listw(knn4,style = 'W') # k=4
+sp_dnb1 <- nb2listw(dnb,style = 'W') # cut off = 3.124075
+sp_dnb2 <- nb2listw(dnb2,style = 'W') # cut off = 4.8
+sp_contb <- nb2listw(contnb,style = 'W') # contiguity based queen=T
+```
+
+## The MORAN'S I TESTs of spatial autocorrelation 
+Now using the moran.test() function I'm going to see if there is a (significant) spatial autocorrelation.\
+
+The quartile distribution of prices could get some hints on the presence of spatial autocorrelation: if neighbors close each other have a similar color, then there could be a positive spatial autocorrelation.
+
+```{r plot quartile, fig.align='center'}
+brks <- round(quantile(rome$median_price), digits=3)
+colours <- grey((length(brks):2)/length(brks))
+plot(rome, col=colours[findInterval(rome$median_price, brks, all.inside=TRUE)])
+title(main="Median price for each neighborhood")
+```
+\
+It seems that there is autocorrelation between almost all neighborhoods except those in the and North-East of Rome.
+
+\
+Then, a test on the variable "median_price" is performed to see if it is spatially auto-correlated. I am going to do that with each of the Spatial weight matrices previously computed. All of them are tested under the assumption of normality, randomization and with the Monte Carlo test.
+
+### Moran's I with knn
+  + k = 1
+```{r knn1 moran}
+moran.test(rome$median_price, sp_knn1, randomisation=F) #normality
+moran.test(rome$median_price, sp_knn1, randomisation=T) #randomization
+moran.mc(rome$median_price, sp_knn1, nsim=999) #monte carlo
+```
+
+  + k = 4
+```{r knn4 moran}
+moran.test(rome$median_price, sp_knn4, randomisation=F) #p-value low
+moran.test(rome$median_price, sp_knn4, randomisation=T) #p-value low
+moran.mc(rome$median_price, sp_knn4, nsim=999) #p-value low
+```
+\
+With knn=1 and knn=4 the Moran's I index is positive in both cases (and with the 3 specifications) with a value of the index around 0.8 and significant p-values that allow to reject the null hypothesis of no spatial autocorrelation. k = 4 seems to perform better  than k=1. \
+
+### Moran's I with critical cut off
+  + cut-off = 3.12 
+```{r cut off moran test sp_dnb1}
+moran.test(rome$median_price, sp_dnb1, randomisation=F) 
+moran.test(rome$median_price, sp_dnb1, randomisation=T) 
+moran.mc(rome$median_price, sp_dnb1, nsim=999) 
+```
+
+
+  + cut-off = 4.8
+```{r cut off moran test}
+moran.test(rome$median_price, sp_dnb2, randomisation=F) 
+moran.test(rome$median_price, sp_dnb2, randomisation=T) 
+moran.mc(rome$median_price, sp_dnb2, nsim=999) 
+```
+\
+
+  + With 3.12 km the value of the  Moran's I index is around 0.57 and the p-value is significant \
+  + Using 4.8 km as a cut off the Moran's I index is positive with a value of 0.33 and the p-value is significant.\
+
+
+### Moran's I with contiguity based
+```{r contiguity based moran test}
+moran.test(rome$median_price, sp_contb, randomisation=F) 
+moran.test(rome$median_price, sp_contb, randomisation=T) 
+moran.mc(rome$median_price, sp_contb, nsim=999) 
+```
+\
+Also with the contiguity based method the p-values are significant and the Moran's I index is positive with a value around 0.73.
+
+  + All the p-values are small enough to reject the null hypothesis of no spatial autocorrelation suggesting that there is a positive spatial autocorrelation. The value of the Moran's I is quite high in all results. 
+
+  + The highest value of the Moran's I index is the one obtained with the k-nearest-neighbors with k = 1 (0.87): there may be well defined cluster (better assessed later with the local analysis).
+
+
+## GLOBAL PRICE SPATIAL AUTOCORRELATION
+The Moran's I can be used to detect the presence  of spatial autocorrelation in the residuals of a linear regression model, that is we can use it to better check the presence of autocorrelation.
+
+It could be useful to perform a subset selection of the variables to have a first understanding of their "potential" meaning and utility.
+```{r}
+library(leaps)
+subset_sel <- regsubsets(median_price ~tot_schools + population +  area + pop_density + tourist_activites, rome)
+summary(subset_sel)
+```
+\
+Through the subset selection. \
+
+  * best one-variable model --> area \
+  * best two-variables model --> tot_schools + area \
+  * best three-variables model --> tot_schools + area + pop_density \
+  * best four-variables model --> population + area + pop_density + tourist_activites \
+  
+Choose the proper number of variables:
+```{r choosing number of variables, fig.align='center'}
+par(mfrow = c(2,2))
+plot(summary(subset_sel)$rss, xlab = "Number of Variables", ylab = "RSS", type = "l")
+plot(summary(subset_sel)$adjr2, xlab = "Number of Variables", ylab = "Adjusted RSq", type = "l")
+
+adj_r2_max = which.max(summary(subset_sel)$adjr2) 
+points(adj_r2_max, summary(subset_sel)$adjr2[adj_r2_max], col ="red", cex = 2, pch = 20)
+
+# For C_p and BIC: look for models with the SMALLEST statistic
+plot(summary(subset_sel)$cp, xlab = "Number of Variables", ylab = "Cp", type = "l")
+cp_min = which.min(summary(subset_sel)$cp) 
+points(cp_min, summary(subset_sel)$cp[cp_min], col = "red", cex = 2, pch = 20)
+
+plot(summary(subset_sel)$bic, xlab = "Number of Variables", ylab = "BIC", type = "l")
+bic_min = which.min(summary(subset_sel)$bic) 
+points(bic_min, summary(subset_sel)$bic[bic_min], col = "red", cex = 2, pch = 20)
+```
+\
+For RSS, BIC, Cp the best model is the **two-variable** model. Instead, the Adjusted R-Squared suggests that the best one is the four-variables model. However, there is not a big difference in the Adjusted R-Squared from 2 to 4 variables, so it would be reasonable to choose the model with two variables (reduce complexity). For completeness, I'm going to compare the models with 2 and 4 predictors (just to see if and how "tourist_activities" affect the price and to spot something interesting or unexpected).
+  
+\
+The Moran's I test of spatial autocorrelation in OLS residuals is applied to the model with two and four predictors:
+
+```{r lin regr}
+lm2 <- lm(median_price ~ tot_schools + area, rome)
+lm4 <- lm(median_price ~ population + area + pop_density + tourist_activites, rome)
+summary((lm2))
+```
+```{r sum_lm4}
+summary(lm4)
+```
+
+\
+
+  + the p-values are very low hence being significant;
+  + the value of the Adjusted R-squared increases as the number of variables increase. The fitting is quite good in both models;
+  + the significance of the estimates changes with the specifications;
+  + it is interesting to note that all variables have a negative significant coefficient except tourist_activities being the only one positive coefficient even if not in a significant way.
+  
+Since tourist_activites and pop_density do not affect much the inference, it makes sense to continue with the two-variables model. However, since we just said that there is evidence of spatial autocorrelation, these estimates are not reliable since the assumption of independence is violated. It is possible to use the Moran's I index to check if the OLS residuals are autocorrelated --> application for models lm2, lm4.
+
+
+Looking at the plot we get a hint about the presence of spatial dependence in the residuals:\
+```{r}
+studres2 <- rstudent(lm2)
+studres4 <- rstudent(lm4)
+```
+
+
+```{r plot res, fig.align='center'}
+par(mfrow=c(1,2))
+
+resdistr2 <- quantile(studres2) 
+colours <- grey((length(resdistr2):2)/length(resdistr2))
+plot(rome, col=colours[findInterval(studres2, resdistr2, all.inside=TRUE)])
+title(main="Two predictors")
+
+resdistr4 <- quantile(studres4) 
+colours <- grey((length(resdistr4):2)/length(resdistr4))
+plot(rome, col=colours[findInterval(studres4, resdistr4, all.inside=TRUE)])
+title(main="Four predictors")
+```
+
+  + With two predictors the two neighbors of Ostia seem to be autocorrelated in a stronger way (darker color) with respect to the four predictors. 
+  + Overall, differences are not so pronounced. 
+
+\
+To apply the Moran's I on OLS the function to be used is lm.morantest(). We previously said that since there are no data about the Agro Romano (that should connect Ostia with the rest of Rome) it should be better to consider the knn and the critical cut-off methods only. \
+
+  + For knn I decide to consider only k=4 since it has a smaller p-value than k=1. \
+  + For the critical cut-off I consider only the sp_dnb1 (3.12 km) that performs better than cut-off = 4.8 km\
+\
+\s
+  + two-predictors
+```{r lm2 and knn4}
+library(spdep)
+lm.morantest(lm2, sp_knn4, resfun = rstudent) # low p-value 
+
+```
+
+```{r lm2 cutoff 3,12}
+lm.morantest(lm2, sp_dnb1, resfun = rstudent) # low p-value
+
+```
+
+\
+
+  + four-predictors
+```{r lm4 and knn4}
+lm.morantest(lm4, sp_knn4, resfun = rstudent) # low p-value  - best value at all
+
+```
+
+
+```{r lm4 and cut off 3.12}
+lm.morantest(lm4, sp_dnb1, resfun = rstudent) # low p-value  
+
+```
+
+
+All the p-values enable to reject the hypothesis of no autocorrelation between residuals and the strongest evidence comes from the test considering lm4 and k=4. Moreover, the rejection of the null hypothesis is a robust result since it does not depend on the specification of the spatial weight matrix.\
+
+To apply the test under permutation bootstrap the lm4 and knn4 are chosen and compared with lm2 and knn4:
+```{r  test under permutation bootstrap lm4-knn4}
+library(boot)
+LinearSolow.lmx <- lm(median_price ~ population + area + pop_density + tourist_activites, data = rome, x=TRUE)
+MoraneI.boot <- function(var, i, ...) {
+  var <- var[i]
+  lmres <- lm(var ~ LinearSolow.lmx$x - 1)
+  return(moran(x=residuals(lmres), ...)$I)	  
+}
+boot1 <- boot(residuals(LinearSolow.lmx),statistic=MoraneI.boot,  
+                R=999, sim="permutation", listw=sp_knn4,  
+                n=length(sp_knn4$neighbours), S0=Szero(sp_knn4))
+ti <- (boot1$t0 - mean(boot1$t))/sqrt(var(boot1$t))  
+boot1
+```
+
+
+```{r plot boot lm4-knn4, fig.align='center'}
+plot(boot1)
+```
+
+
+```{r  test under permutation bootstrap lm2-knn4, fig.align='center'}
+library(boot)
+LinearSolow.lmx <- lm(median_price ~ tot_schools + area, data = rome, x=TRUE)
+MoraneI.boot <- function(var, i, ...) {
+  var <- var[i]
+  lmres <- lm(var ~ LinearSolow.lmx$x - 1)
+  return(moran(x=residuals(lmres), ...)$I)	  
+}
+boot1 <- boot(residuals(LinearSolow.lmx),statistic=MoraneI.boot,  
+                R=999, sim="permutation", listw=sp_knn4,  
+                n=length(sp_knn4$neighbours), S0=Szero(sp_knn4))
+ti <- (boot1$t0 - mean(boot1$t))/sqrt(var(boot1$t))  
+boot1
+
+plot(boot1)
+```
+\
+
+From both bootstrap permutations we have that \
+
+  * The dashed line represents the Moran's I and it is positive, \
+  * residuals are well approximated by the normal distribution \
+hence there is enough evidence to **reject the Null Hypothesis of no spatial autocorrelation** .\
+
+## LOCAL PRICE SPATIAL AUTOCORRELATION
+To investigate the spatial autocorrelation at a **local** level it is possible to use the *moran scatterplot* and the  *local Moran's I*. Here I consider only the k-nearest neighbors with k=4. \
+
+Through the Moran scatterplot it is possible to assess which spatial unit contributes more to the presence of autocorrelation even though this plot does not provide the statistical significance of the results. 
+
+```{r moran scatterplot, fig.align='center'}
+mplotknn <- moran.plot(rome$median_price, listw=sp_knn4, main="Moran scatterplot with KNN",return_df=F)
+grid()
+# x: median_price
+# y: spatial lag
+```
+\
+The quadrants that give some hints about positiv/negative spatial autocorrelation are: \
+
+  + HH quadrant: identifies spatial units with values x and Wx above the average \
+  + LL quadrant: identifies spatial units with values x and Wx under the average \
+
+The units that most affect the spatial autocorrelation are those signed with a black diamond. The slope of the regression line represents the Moran's I and, as we found before, the slope and hence the spatial autocorrelation is positive. This plot allows to identify units that contribute more to the slope of the line and hence units that may be considered as a spatial cluster. \
+
+The significance of the results got with the moran scatterplot can be assessed by the local Moran's I. First, let's identify the influential regions:
+```{r hotspost}
+hotspot <- as.numeric(row.names(as.data.frame(summary(mplotknn)))) 
+```
+
+and we get the numbers of most influential neighborhoods (hotspot). Values of the spatial lag can be obtained by the function lag.listw(), then it is possible to assign each influential neighbors to the proper Moran scatterplot quadrant:
+
+```{r}
+rome$wx <- lag.listw(sp_knn4, rome$median_price) # creats the spatial lag according to the spatial weight matrix
+
+rome$quadrant <- rep("None", length(rome$median_price))
+for(i in 1:length(hotspot))  {
+  if (rome$median_price[hotspot[i]]>mean(rome$median_price) & rome$wx[hotspot[i]]> mean(rome$wx)) 
+        rome$quadrant[hotspot[i]] <- "HH" 
+  if (rome$median_price[hotspot[i]]>mean(rome$median_price) & rome$wx[hotspot[i]]< mean(rome$wx)) 
+        rome$quadrant[hotspot[i]] <- "HL" 
+  if (rome$median_price[hotspot[i]]<mean(rome$median_price) & rome$wx[hotspot[i]]<mean(rome$wx)) 
+        rome$quadrant[hotspot[i]] <- "LL" 
+  if (rome$median_price[hotspot[i]]<mean(rome$median_price) & rome$wx[hotspot[i]]>mean(rome$wx)) 
+        rome$quadrant[hotspot[i]] <- "LH" 
+  }
+table(rome$quadrant)
+
+
+```
+
+\
+There are 47 neighbors that are not significant for the spatial autocorrelation, the other six are significant in both positive and positive/negative ways. \
+
+  + 4 obs in the HH quadrant: Pigna (53),S.Angelo (45), Trevi (41), Campo Marzio (34) --> in the centre of Rome  \
+  + 2 obs in the HL qudrant: Appio Pignatelli (37),Giuliano Dalmata (23) \
+
+And now plot the map of these neighbors:
+```{r, fig.align='center'}
+rome$colours[rome$quadrant=="None"] <- "white" 
+rome$colours[rome$quadrant=="HH"] <- "black" #hotspot regions (spatial cluster)
+rome$colours[rome$quadrant=="LL"] <- gray(0.9) 
+rome$colours[rome$quadrant=="LH"] <- gray(0.4)
+rome$colours[rome$quadrant=="HL"] <- gray(0.7)
+plot(rome, col=rome$colours)
+legend(x=-10, y=73, legend=c("None", "Low-Low", "High-Low", "Low-High", "High-High"),
+                      fill=c("white", gray(0.9), gray(0.7), gray(0.4),
+                      "black"), bty="n", cex=0.8)
+title(main="Neighbours with influence - knn")
+```
+\
+To assess the significance of the revealed pattern the local Moran's I has to be performed by the localmoran() function where each observation is a spatial unit and for each  the Moran's I index and the p-value are computed:
+
+```{r local moran, fig.align='center'}
+lmI <- localmoran(rome$median_price, sp_knn4) # each obs is a spatial unit and for each we have the moran's I and p-value
+head(lmI)
+```
+
+Plot the distribution of the local Moran's I index values 
+```{r distribution of the local Moran, fig.align='center'}
+brks <- sort(as.numeric(lmI[,1]))
+colours <- grey((0:length(lmI[,1]))/length(lmI[,1]))
+plot(rome, col=colours[findInterval(lmI[,1], brks, all.inside=TRUE)])
+title(main="Local Moran's I values")
+```
+
+Local statistics can be dested trhough the hypothesis of no local autocorrelation, hence providing the significance of spotted pattern got by the Moran scatterplot. In the p-values map the darker the color, the smaller the p-value: 
+```{r, fig.align='center'}
+pval <- as.numeric(lmI[,5])
+rome$colpval[pval>0.05] <- "white" 
+rome$colpval[pval<=0.05 & pval>0.01] <- gray(0.9) # #E6E6E6
+rome$colpval[pval<=0.01 & pval>0.001] <- gray(0.7) # #B3B3B3
+rome$colpval[pval<=0.001 & pval>0.0001] <- gray(0.4) ##666666
+rome$colpval[pval<=0.0001] <- "black"
+
+plot(rome, col=rome$colpval)
+legend(x=-10, y=73, legend=c("Not significant", 
+       "p-value = 0.05", "p-value = 0.01", "p-value = 0.001", 
+       "p-value = 0.0001"), fill=c("white", gray(0.9), gray(0.7),    
+       gray(0.4), "black"), bty="n", cex=0.8)
+title(main="Local Moran's I significance map - KNN (k=4)")
+
+```
+
+```{r kable}
+kable(rome@data, caption = "Neighbourhoods")
+```
+  + significant spatial autocorrelation  in the center of Rome, there is one neighborhood more with a significant p-value. Well defined cluster with 5 neighborhoods in the centre of Rome. 
+  + significant spatial autocorrelation in North-East --> not previously captured by the global analysis: Prenestino Centocelle, Ponte Mammolo, San Basilio, Alessandrino 
+  
+REMARK: I tried also to perform local analysis with the critical cut-off method and results do not change.
+
+
+
+# CONCLUSION & RESULTS
+
+From the analysis emerges that there is spatial autocorrelation between neighbors in the center of Rome since all the p-values obtained with the global analysis are significant and enable to reject the null hypothesis of no spatial autocorrelation. Moreover, these results are robust since they do not depend on the Spatial Weight matrix specification. The best performing model in the global analysis is the k-nearest neighbors with k = 4, even if all models always lead to the same result providing the same evidence. \
+The most affecting neighborhoods for the spatial autocorrelation are those in the centre of Rome signed in black in the last plot, they are: Pigna,  Campo Marzio, Trevi, S.Angelo, S.Eustachio. Sometimes it can happen that the gloabal analysis does not capture some local phenomena that instead are revealed by the local analysis. This may depend on some specific phenomena that is not evident when performing the global analysis.For further analysis it will be useful to better investigate for the presence of local phenomena since it appears that there is something generating a spatial autocorrelation in North-East of Rome.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
