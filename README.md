@@ -1,5 +1,5 @@
 # Geospatial-Analysis
-Project for the course 'Geospatial Analysis and Representation for Data Science' (MSc in Data Science - University of Trento).
+Project for the course 'Geospatial Analysis and Representation for Data Science' (**MSc in Data Science - University of Trento**).
 
 This repository contains: \
 • Data: download all files from the folder "data"  and upload them in a folder called Geospatial_Project(code provided to mount the drive in the notebook)\
